@@ -27,14 +27,17 @@ except Exception as e:
 AMOUNT_SOL = 0.03
 MAX_SLIPPAGE = 1500  
 PRIORITY_FEE = 150000 
-MIN_LIQ_USD = 10000  
 
 def tg(m):
+    """Mfumo wa kutuma ripoti Telegram"""
     try: bot.send_message(CHAT_ID, m, parse_mode='Markdown', disable_web_page_preview=False)
     except: pass
 
+# ---------- TELEGRAM COMMANDS ----------
+
 @bot.message_handler(commands=['balance'])
 def check_balance(message):
+    """Amri ya kuona salio lako la SOL"""
     async def get_bal():
         try:
             bal = await solana.get_balance(user.pubkey())
@@ -45,21 +48,22 @@ def check_balance(message):
 
 @bot.message_handler(commands=['status'])
 def status(message):
-    bot.reply_to(message, "🚀 **ALPHA-SNIPER v4.6** is Active and Scanning...")
+    bot.reply_to(message, "🚀 **ALPHA-SNIPER v4.7** is Active and Scanning...")
 
-# ---------- SMART FILTERS ----------
+# ---------- SMART FILTERS (RugCheck) ----------
 
 async def is_high_quality(mint):
     async with aiohttp.ClientSession() as s:
         try:
             async with s.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", timeout=5) as r:
                 data = await r.json()
+                # Kuzuia Rugs: Score lazima iwe chini ya 400
                 if data.get("score", 1000) > 400: return False 
                 if data.get("tokenMeta", {}).get("mutable", True): return False 
             return True
         except: return False
 
-# ---------- TRADING ENGINE ----------
+# ---------- TRADING ENGINE (Jupiter V6) ----------
 
 async def swap(in_m, out_m, amt, action="Trade"):
     async with aiohttp.ClientSession() as s:
@@ -81,7 +85,7 @@ async def swap(in_m, out_m, amt, action="Trade"):
             return {"sig": sig, "amt": float(q["outAmount"])}
         except: return None
 
-# ---------- MONITORING ENGINE ----------
+# ---------- MONITORING & TAKE PROFIT ----------
 
 class SmartEngine:
     def __init__(self, mint, buy_p, total_tokens):
@@ -89,7 +93,7 @@ class SmartEngine:
         self.buy_p = buy_p
         self.rem = total_tokens
         self.high = buy_p
-        self.targets = [0.25, 0.50, 0.75, 1.00] 
+        self.targets = [0.25, 0.50, 0.75, 1.00] # TP 25%, 50%, 75%, 100%
 
     async def get_price(self):
         async with aiohttp.ClientSession() as s:
@@ -109,11 +113,12 @@ class SmartEngine:
                 profit = (curr - self.buy_p) / self.buy_p
                 if curr > self.high: self.high = curr 
 
-                # Whale Protection & Take Profit
+                # Trailing Stop Loss (15% dump from high)
                 if curr < self.high * 0.85:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem, "TRAILING EXIT")
                     break
 
+                # Scaled Take Profit
                 for t in self.targets[:]:
                     if profit >= t:
                         sell_pct = 0.25 if t < 1.00 else 1.0 
@@ -121,6 +126,7 @@ class SmartEngine:
                             self.rem -= (self.rem * sell_pct)
                         self.targets.remove(t)
 
+                # Absolute Stop Loss (20%)
                 if profit <= -0.20:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem, "STOP LOSS")
                     break
@@ -131,7 +137,7 @@ class SmartEngine:
 
 async def main_listener():
     RAYDIUM = "675kPX9MHTjS2zt1qf1NYzt2i64ZEv3M96GvLpSaVYn"
-    while True: # loop ya ku-reconnect ikikatika
+    while True:
         try:
             async with websockets.connect(WSS_URL, ping_interval=20, ping_timeout=20) as ws:
                 await ws.send(json.dumps({"jsonrpc":"2.0","id":1,"method":"logsSubscribe","params":[{"mentions":[RAYDIUM]},{"commitment":"processed"}]}))
@@ -155,12 +161,19 @@ async def main_listener():
             print(f"Reconnect in 5s: {e}")
             await asyncio.sleep(5)
 
+# ---------- STARTUP ENGINE ----------
+
 if __name__ == "__main__":
-    try: bot.remove_webhook()
+    # Kuzuia kosa la Conflict 409
+    try: 
+        bot.remove_webhook()
+        print("✅ Webhook removed")
     except: pass
     
+    # Kuzuia kosa la TypeError
     Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
     
+    # Kuwasha Sniper
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main_listener())
