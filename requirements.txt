@@ -1,0 +1,7 @@
+python-dotenv
+pytelegrambotapi
+solders
+solana
+base58
+websockets
+aiohttp
