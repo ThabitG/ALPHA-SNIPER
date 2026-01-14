@@ -30,19 +30,17 @@ PRIORITY_FEE = 150000
 MIN_LIQ_USD = 10000  
 
 def tg(m):
-    """Notification system kwa Telegram"""
     try: bot.send_message(CHAT_ID, m, parse_mode='Markdown', disable_web_page_preview=False)
     except: pass
 
-# ---------- TELEGRAM COMMANDS ----------
-
 @bot.message_handler(commands=['balance'])
 def check_balance(message):
-    """Kuona salio lako la SOL"""
     async def get_bal():
-        bal = await solana.get_balance(user.pubkey())
-        amount = bal.value / 1e9
-        bot.reply_to(message, f"💰 **Wallet Balance:** `{amount:.4f} SOL`")
+        try:
+            bal = await solana.get_balance(user.pubkey())
+            amount = bal.value / 1e9
+            bot.reply_to(message, f"💰 **Wallet Balance:** `{amount:.4f} SOL`")
+        except: bot.reply_to(message, "❌ Connection Busy, jaribu tena.")
     asyncio.run(get_bal())
 
 @bot.message_handler(commands=['status'])
@@ -54,7 +52,7 @@ def status(message):
 async def is_high_quality(mint):
     async with aiohttp.ClientSession() as s:
         try:
-            async with s.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary") as r:
+            async with s.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", timeout=5) as r:
                 data = await r.json()
                 if data.get("score", 1000) > 400: return False 
                 if data.get("tokenMeta", {}).get("mutable", True): return False 
@@ -81,10 +79,9 @@ async def swap(in_m, out_m, amt, action="Trade"):
             link = f"https://solscan.io/tx/{sig}"
             tg(f"🔔 **{action} Executed!**\nTransaction: [View on Solscan]({link})")
             return {"sig": sig, "amt": float(q["outAmount"])}
-        except Exception as e:
-            print(f"Swap Error: {e}"); return None
+        except: return None
 
-# ---------- TAKE PROFIT & WHALE PROTECTION ----------
+# ---------- MONITORING ENGINE ----------
 
 class SmartEngine:
     def __init__(self, mint, buy_p, total_tokens):
@@ -103,73 +100,67 @@ class SmartEngine:
             except: return 0
 
     async def monitor(self):
-        tg(f"🎯 **Target Locked!** Monitoring `{self.mint[:8]}...` for 25%, 50%, 75%, 100% TP")
+        tg(f"🎯 **Target Locked!** Monitoring `{self.mint[:8]}`")
         while self.rem > 0:
             try:
                 curr = await self.get_price()
-                if curr == 0: await asyncio.sleep(5); continue
+                if curr == 0: await asyncio.sleep(10); continue
                 
                 profit = (curr - self.buy_p) / self.buy_p
                 if curr > self.high: self.high = curr 
 
-                # Whale Protection (Trailing Stop 15%)
+                # Whale Protection & Take Profit
                 if curr < self.high * 0.85:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem, "TRAILING EXIT")
                     break
 
-                # Scaled Take Profit (25%, 50%, 75%, 100%)
                 for t in self.targets[:]:
                     if profit >= t:
                         sell_pct = 0.25 if t < 1.00 else 1.0 
-                        sell_amt = self.rem * sell_pct
-                        
-                        if await swap(self.mint, "So11111111111111111111111111111111111111112", sell_amt, f"TP {int(t*100)}% HIT"):
-                            self.rem -= sell_amt
+                        if await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem * sell_pct, f"TP {int(t*100)}%"):
+                            self.rem -= (self.rem * sell_pct)
                         self.targets.remove(t)
 
                 if profit <= -0.20:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem, "STOP LOSS")
                     break
-
-                await asyncio.sleep(5)
-            except: await asyncio.sleep(10)
+                await asyncio.sleep(10)
+            except: await asyncio.sleep(20)
 
 # ---------- SNIPER LISTENER ----------
 
 async def main_listener():
     RAYDIUM = "675kPX9MHTjS2zt1qf1NYzt2i64ZEv3M96GvLpSaVYn"
-    async with websockets.connect(WSS_URL) as ws:
-        await ws.send(json.dumps({"jsonrpc":"2.0","id":1,"method":"logsSubscribe","params":[{"mentions":[RAYDIUM]},{"commitment":"processed"}]}))
-        print("🚀 Sniper is listening..."); tg("🚀 **ALPHA-SNIPER v4.6 ACTIVE**")
+    while True: # loop ya ku-reconnect ikikatika
+        try:
+            async with websockets.connect(WSS_URL, ping_interval=20, ping_timeout=20) as ws:
+                await ws.send(json.dumps({"jsonrpc":"2.0","id":1,"method":"logsSubscribe","params":[{"mentions":[RAYDIUM]},{"commitment":"processed"}]}))
+                print("🚀 Sniper Listening..."); tg("🚀 **SNIPER ACTIVE**")
 
-        while True:
-            try:
-                msg = json.loads(await ws.recv())
-                logs = msg.get("params", {}).get("result", {}).get("value", {}).get("logs", [])
-                for l in logs:
-                    if "initialize2" in l.lower():
-                        match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44})', l)
-                        if match:
-                            mint = match.group(1)
-                            if mint == RAYDIUM: continue
-                            if await is_high_quality(mint):
-                                buy = await swap("So11111111111111111111111111111111111111112", mint, AMOUNT_SOL*1e9, "BUY")
-                                if buy:
-                                    price = await SmartEngine(mint, 0, 0).get_price()
-                                    engine = SmartEngine(mint, price, buy["amt"])
-                                    asyncio.create_task(engine.monitor())
-            except: continue
-
-# ---------- STARTUP FIX ----------
+                while True:
+                    msg = json.loads(await ws.recv())
+                    logs = msg.get("params", {}).get("result", {}).get("value", {}).get("logs", [])
+                    for l in logs:
+                        if "initialize2" in l.lower():
+                            match = re.search(r'([1-9A-HJ-NP-Za-km-z]{32,44})', l)
+                            if match:
+                                mint = match.group(1)
+                                if mint == RAYDIUM: continue
+                                if await is_high_quality(mint):
+                                    buy = await swap("So11111111111111111111111111111111111111112", mint, AMOUNT_SOL*1e9, "BUY")
+                                    if buy:
+                                        p = await SmartEngine(mint, 0, 0).get_price()
+                                        asyncio.create_task(SmartEngine(mint, p, buy["amt"]).monitor())
+        except Exception as e:
+            print(f"Reconnect in 5s: {e}")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try: bot.remove_webhook()
     except: pass
     
-    # Hapa tumerekebisha TypeError (polling got multiple values)
     Thread(target=lambda: bot.infinity_polling(skip_pending=True), daemon=True).start()
     
-    try:
-        asyncio.run(main_listener())
-    except KeyboardInterrupt:
-        print("🛑 Stopped.")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main_listener())
