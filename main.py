@@ -6,87 +6,66 @@ from solana.rpc.async_api import AsyncClient
 from dotenv import load_dotenv
 import telebot
 
-# ---------- SETUP & KEYS ----------
+# ---------- SETUP ----------
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(os.getenv('TELEGRAM_TOKEN'))
 solana = AsyncClient(os.getenv('RPC_URL'))
 WSS_URL = os.getenv('WSS_URL')
-
 try:
     user = Keypair.from_bytes(base58.b58decode(os.getenv('SOLANA_PRIVATE_KEY')))
-    print(f"✅ Wallet Loaded: {user.pubkey()}")
-except Exception as e:
-    print(f"❌ Wallet Error: {e}")
-    exit()
+    CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+except: print("❌ Check Keys!"); exit()
 
 # ---------- SETTINGS ----------
 AMOUNT_SOL = 0.03
-MAX_SLIPPAGE = 1500      # 15% slippage kwa ajili ya volatility
-PRIORITY_FEE = 100000    # MEV-style priority (Helius friendly)
-MIN_LIQ_USD = 10000      # Filter: Usinunue token yenye liquidity chini ya $10k
-MOONBAG_PCT = 0.15       # 15% ya tokens zinaachwa forever (Moonshot)
+MAX_SLIPPAGE = 1500  # 15% kwa ajili ya pump kali
+PRIORITY_FEE = 100000 # MEV-style priority
+MIN_LIQ_USD = 10000  # Chini ya $10k tunaskip
+MOONBAG_PCT = 0.15   # 15% inaachwa forever
 
 def tg(m):
-    """Function ya kutuma ujumbe Telegram"""
     try: bot.send_message(CHAT_ID, m, parse_mode='Markdown')
     except: pass
 
-# ---------- TELEGRAM COMMANDS ----------
-
-@bot.message_handler(commands=['balance'])
-def check_balance(m):
-    async def get_bal():
-        try:
-            resp = await solana.get_balance(user.pubkey())
-            tg(f"💰 **Wallet Balance:** `{resp.value / 1e9:.4f} SOL`")
-        except: tg("❌ Error kupata salio la wallet.")
-    asyncio.run_coroutine_threadsafe(get_bal(), asyncio.get_event_loop())
-
-@bot.message_handler(commands=['status'])
-def status(m):
-    tg("🟢 **ALPHA-SNIPER Status:** Running\n🛰️ **Mode:** Autonomous Protection ON")
-
-# ---------- FILTERS (Anti-Rug & Momentum) ----------
+# ---------- SMART FILTERS (Anti-Rug & Momentum) ----------
 
 async def is_high_quality(mint):
     """
-    Uchujaji wa AI: RugCheck, Honeypot, na Volume Check
+    AI Filter: Volume, RugCheck, na Honeypot Protection
     """
     async with aiohttp.ClientSession() as s:
         try:
-            # 1. RugCheck Authority & Security Score
+            # 1. RugCheck & Authority Check
             async with s.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary") as r:
                 data = await r.json()
-                if data.get("score", 1000) > 400: return False # Block high risk
-                if data.get("tokenMeta", {}).get("mutable", True): return False # Block mutable tokens
+                if data.get("score", 1000) > 400: return False # Rug risk
+                # Check kama mint authority iko locked
+                if data.get("tokenMeta", {}).get("mutable", True): return False 
 
-            # 2. DexScreener Scanner (Volume & Liquidity)
+            # 2. Momentum & Volume Scanner (DexScreener API)
             async with s.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}") as r:
                 dex = await r.json()
                 pairs = dex.get("pairs", [])
                 if not pairs: return False
                 
                 pair = pairs[0]
-                if pair.get("liquidity", {}).get("usd", 0) < MIN_LIQ_USD: return False
-                if pair.get("volume", {}).get("h1", 0) < 5000: return False # Block zero volume
+                vol = pair.get("volume", {}).get("h1", 0)
+                liq = pair.get("liquidity", {}).get("usd", 0)
+                
+                if liq < MIN_LIQ_USD: return False # Liquidity Trash blocked
+                if vol < 5000: return False        # Kama haina volume, tunaskip (Fake Pump)
+                
             return True
         except: return False
 
 # ---------- TRADING ENGINE (Jupiter V6) ----------
 
 async def swap(in_m, out_m, amt):
-    """Inafanya Buy/Sell kupitia Jupiter API"""
     async with aiohttp.ClientSession() as s:
         try:
-            q_url = f"https://quote-api.jup.ag/v6/quote?inputMint={in_m}&outputMint={out_m}&amount={int(amt)}&slippageBps={MAX_SLIPPAGE}"
-            async with s.get(q_url) as r:
-                q = await r.json()
-            
+            q = await (await s.get(f"https://quote-api.jup.ag/v6/quote?inputMint={in_m}&outputMint={out_m}&amount={int(amt)}&slippageBps={MAX_SLIPPAGE}")).json()
             p = {"quoteResponse": q, "userPublicKey": str(user.pubkey()), "wrapAndUnwrapSol": True, "prioritizationFeeLamports": PRIORITY_FEE}
-            async with s.post("https://quote-api.jup.ag/v6/swap", json=p) as r:
-                sw = await r.json()
+            sw = await (await s.post("https://quote-api.jup.ag/v6/swap", json=p)).json()
             
             raw = base58.b58decode(sw["swapTransaction"])
             tx = VersionedTransaction.from_bytes(raw)
@@ -95,7 +74,7 @@ async def swap(in_m, out_m, amt):
             return {"sig": str(res.value), "amt": float(q["outAmount"])}
         except: return None
 
-# ---------- MONITORING & EXIT STRATEGY ----------
+# ---------- AUTONOMOUS PROFIT & WHALE RADAR ----------
 
 class SmartEngine:
     def __init__(self, mint, buy_p, total_tokens):
@@ -104,48 +83,52 @@ class SmartEngine:
         self.rem = total_tokens
         self.high = buy_p
         self.moonbag_saved = False
-        self.targets = [0.25, 0.50, 0.75, 1.00] # 4-Stage TP
+        self.targets = [0.25, 0.50, 0.75, 1.00] # Scaled TP
+
+    async def get_price(self):
+        async with aiohttp.ClientSession() as s:
+            d = await (await s.get(f"https://api.jup.ag/price/v2?ids={self.mint}")).json()
+            return float(d["data"][self.mint]["price"])
 
     async def monitor(self):
-        tg(f"🎯 **Target Locked:** `{self.mint[:6]}`\nStrategy: Scaled TP + Whale Radar")
+        tg(f"🎯 **Target Locked:** `{self.mint[:6]}`\nStrategy: Scaled TP + Moonbag")
         while self.rem > 0:
             try:
-                async with aiohttp.ClientSession() as s:
-                    d = await (await s.get(f"https://api.jup.ag/price/v2?ids={self.mint}")).json()
-                    curr = float(d["data"][self.mint]["price"])
-                
+                curr = await self.get_price()
                 profit = (curr - self.buy_p) / self.buy_p
-                if curr > self.high: self.high = curr # Trailing High
+                if curr > self.high: self.high = curr # Trailing high
 
-                # WHALE DUMP RADAR: Ikishuka 15% kutoka kileleni, UZA!
+                # 1. WHALE DUMP RADAR & TRAILING STOP
+                # Kama price inadrop kwa 15% ghafla kutoka kwenye 'high', uza kila kitu (Whale Exit)
                 if curr < self.high * 0.85:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem)
-                    tg(f"🐋 **Whale Dump Detected!** Emergency Exit on `{self.mint[:5]}`"); break
+                    tg(f"🐋 **Whale Dump/Trailing Exit** at `{self.mint[:5]}`"); break
 
-                # SCALED TAKE PROFIT & MOONBAG
-                for t in self.targets[:]:
+                # 2. SCALED TP & MOONBAG LOGIC
+                for t in self.targets:
                     if profit >= t:
+                        # Save Moonbag (15%) on first TP
                         if not self.moonbag_saved:
                             keep = self.rem * MOONBAG_PCT
-                            self.rem -= keep # Tenga moonbag
+                            self.rem -= keep
                             self.moonbag_saved = True
                             tg(f"💎 **Moonbag Secured (15%)** for `{self.mint[:5]}`")
-                        
-                        sell_qty = self.rem * 0.25 if t < 1.0 else self.rem
-                        if await swap(self.mint, "So11111111111111111111111111111111111111112", sell_qty):
-                            self.rem -= sell_qty
-                            tg(f"💰 **TP {int(t*100)}% Hit!** Sold portion.")
-                            self.targets.remove(t)
-                
-                # GLOBAL STOP LOSS
+
+                        sell_amt = self.rem * 0.25 if t < 1.0 else self.rem
+                        if await swap(self.mint, "So11111111111111111111111111111111111111112", sell_amt):
+                            self.rem -= sell_amt
+                            tg(f"💰 **TP {int(t*100)}% Hit!** Portion sold.")
+                        self.targets.remove(t)
+
+                # 3. GLOBAL STOP LOSS
                 if profit <= -0.20:
                     await swap(self.mint, "So11111111111111111111111111111111111111112", self.rem)
-                    tg(f"🛑 **Stop Loss Hit** on `{self.mint[:5]}`"); break
-                
-                await asyncio.sleep(4)
-            except: await asyncio.sleep(10)
+                    tg(f"🛑 **Global Stop Loss** `{self.mint[:5]}`"); break
 
-# ---------- MAIN LISTENER ----------
+                await asyncio.sleep(3)
+            except: await asyncio.sleep(5)
+
+# ---------- MEV-STYLE LISTENER ----------
 
 async def main_listener():
     RAYDIUM = "675kPX9MHTjS2zt1qf1NYzt2i64ZEv3M96GvLpSaVYn"
@@ -164,18 +147,15 @@ async def main_listener():
                             mint = match.group(1)
                             if mint == RAYDIUM: continue
                             
-                            # Chuja rugpulls na fake volume
+                            # START SMART FILTERING
                             if await is_high_quality(mint):
                                 buy_res = await swap("So11111111111111111111111111111111111111112", mint, AMOUNT_SOL*1e9)
                                 if buy_res:
-                                    # Anza kufuatilia faida mara moja
-                                    async with aiohttp.ClientSession() as s:
-                                        p_data = await (await s.get(f"https://api.jup.ag/price/v2?ids={mint}")).json()
-                                        curr_p = float(p_data["data"][mint]["price"])
-                                    asyncio.create_task(SmartEngine(mint, curr_p, buy_res["amt"]).monitor())
+                                    price = await SmartEngine(mint, 0, 0).get_price()
+                                    engine = SmartEngine(mint, price, buy_res["amt"])
+                                    asyncio.create_task(engine.monitor())
             except: continue
 
 if __name__ == "__main__":
-    # Anza Telegram Polling kwenye thread tofauti kuzuia Conflict 409
-    Thread(target=lambda: bot.infinity_polling(non_stop=True, timeout=60), daemon=True).start()
+    Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
     asyncio.run(main_listener())
