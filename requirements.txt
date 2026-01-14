@@ -4,3 +4,4 @@ solana
 aiohttp
 websockets
 python-dotenv
+base58
