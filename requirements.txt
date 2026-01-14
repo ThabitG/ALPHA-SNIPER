@@ -1,7 +1,6 @@
-python-dotenv
-pytelegrambotapi
+pyTelegramBotAPI
 solders
 solana
-base58
-websockets
 aiohttp
+websockets
+python-dotenv
